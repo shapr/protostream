@@ -1,39 +1,39 @@
-{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
-
-{-# OPTIONS_GHC -Wall          #-}
+-- working version of the code in this stack overflow post:
+-- https://stackoverflow.com/questions/41230293/how-to-efficiently-follow-tail-a-file-with-haskell-including-detecting-file
 
 module Main where
 
-import           Control.Monad.IO.Class       (MonadIO)
-import           Control.Monad.Trans.Class    (MonadTrans (lift))
-import           Data.ByteString              (ByteString)
-import           Streaming.Prelude            (Stream)
---import qualified Data.Attoparsec.ByteString.Char8     as A
-import           Data.Functor.Of
-import qualified Streaming.Prelude            as S
-import qualified System.IO.TailFile.Streaming as T
+import           Control.Concurrent.QSem
+import qualified Data.ByteString
+import qualified Data.ByteString.Char8         as BC8
+import           Data.ByteString.Lazy.Internal (defaultChunkSize)
+import qualified Data.ByteString.Streaming     as B
+import           Streaming
+import           System.Environment            (getArgs)
+import           System.INotify
+import           System.IO                     (IOMode (ReadMode), withFile)
 
-
--- 1.6 million lines, wc -l takes 586ms
--- filetoread = "/home/shae/download/incoming/crashdata/nyc.crash.json"
-filetoread :: FilePath
-filetoread = "/tmp/ixess.log"
+tailing :: FilePath -> (B.ByteString IO () -> IO r) -> IO r
+tailing filepath continuation = withINotify $ \i -> do
+    sem <- newQSem 1
+    _ <- addWatch i [Modify, CloseWrite] (BC8.pack filepath) (\_ -> signalQSem sem)
+    withFile filepath ReadMode (\h -> continuation (handleToStream sem h))
+    where
+    handleToStream sem h = B.concat . Streaming.repeats $ do
+        lift (waitQSem sem)
+        readWithoutClosing h
+    -- Can't use B.fromHandle here because annoyingly it closes handle on EOF
+    -- instead of just returning, and this causes problems on new appends.
+    readWithoutClosing h = do
+        c <- lift (Data.ByteString.hGetSome h defaultChunkSize)
+        if Data.ByteString.null c
+           then return ()
+           else do B.chunk c
+                   readWithoutClosing h
 
 main :: IO ()
 main = do
-  print "hi"
-  something filetoread
+  filepath : _ <- getArgs
+  tailing filepath B.stdout
 
-callback :: forall t r void. (MonadTrans t, MonadIO (t IO)) => Stream (Of ByteString) (t IO) r -> t IO (Of void r)
-callback s = do
-  let go st = S.next st >>= \case
-        Left _ -> error "impossible: end of stream"
-        Right (x,next) -> do
-          lift $ print x
-          go next
-  go s
-
-something :: FilePath -> IO void
-something fp = T.tailFile fp callback
